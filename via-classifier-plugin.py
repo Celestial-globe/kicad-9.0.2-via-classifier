@@ -72,90 +72,118 @@ class ViaClassifierPlugin(pcbnew.ActionPlugin):
         # 統合ダイアログを表示
         self.show_unified_dialog(board, inside_vias, outside_vias, overlap_vias, selected_vias_count, edge_points)
         
-    def get_board_outline(self, board):
-        """基板の外形線データを点のリストとして取得"""
-        edge_cut_layer = pcbnew.Edge_Cuts
-        segments = []
-        
-        for drawing in board.GetDrawings():
-            if drawing.GetLayer() == edge_cut_layer:
-                shape_type = drawing.GetShape()
-                
-                if shape_type == pcbnew.S_SEGMENT:
-                    start = drawing.GetStart()
-                    end = drawing.GetEnd()
-                    segments.append((start, end))
-                
-                elif shape_type == pcbnew.S_ARC:
-                    start = drawing.GetStart()
-                    end = drawing.GetEnd()
-                    center = drawing.GetCenter()
-                    radius = math.sqrt((start.x - center.x)**2 + (start.y - center.y)**2)
-                    start_angle = math.atan2(start.y - center.y, start.x - center.x)
-                    end_angle = math.atan2(end.y - center.y, end.x - center.x)
-                    if start_angle < 0:
-                        start_angle += 2 * math.pi
-                    if end_angle < 0:
-                        end_angle += 2 * math.pi
-                    clockwise = False
-                    angle_diff = end_angle - start_angle
-                    if not clockwise and angle_diff < 0:
-                        angle_diff += 2 * math.pi
-                    angle_step = math.radians(10)
-                    segment_count = abs(int(angle_diff / angle_step)) + 1
-                    current_angle = start_angle
-                    last_point = start
-                    
-                    for i in range(segment_count):
-                        next_angle = current_angle + angle_step
-                        if next_angle > end_angle:
-                            next_angle = end_angle
-                        x = center.x + int(radius * math.cos(next_angle))
-                        y = center.y + int(radius * math.sin(next_angle))
-                        next_point = pcbnew.VECTOR2I(x, y)
-                        segments.append((last_point, next_point))
-                        last_point = next_point
-                        current_angle = next_angle
-                        if next_angle == end_angle:
-                            break
-                
-                elif shape_type == pcbnew.S_CIRCLE:
-                    wx.MessageBox("警告: 円形の外形線要素が検出されました。この形状は現在サポートされていません。", 
-                                 "警告", wx.ICON_WARNING)
-        
-        if not segments:
-            return []
+def points_are_close(self, p1, p2, tolerance=1000):  # 許容誤差を0.001mmに縮小
+    """2点が近いか判定"""
+    return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2) < tolerance
+
+def get_board_outline(self, board):
+    """基板の外形線データを点のリストとして取得"""
+    edge_cut_layer = pcbnew.Edge_Cuts
+    segments = []
+    
+    # 外形線のセグメントを取得
+    for drawing in board.GetDrawings():
+        if drawing.GetLayer() == edge_cut_layer:
+            shape_type = drawing.GetShape()
             
-        ordered_points = [segments[0][0]]
-        used_segments = set()
-        max_iterations = len(segments) * 2
-        current_point = segments[0][0]
+            if shape_type == pcbnew.S_SEGMENT:
+                start = drawing.GetStart()
+                end = drawing.GetEnd()
+                segments.append((start, end))
+            
+            elif shape_type == pcbnew.S_ARC:
+                start = drawing.GetStart()
+                end = drawing.GetEnd()
+                center = drawing.GetCenter()
+                radius = math.sqrt((start.x - center.x)**2 + (start.y - center.y)**2)
+                start_angle = math.atan2(start.y - center.y, start.x - center.x)
+                end_angle = math.atan2(end.y - center.y, end.x - center.x)
+                if start_angle < 0:
+                    start_angle += 2 * math.pi
+                if end_angle < 0:
+                    end_angle += 2 * math.pi
+                clockwise = False
+                angle_diff = end_angle - start_angle
+                if not clockwise and angle_diff < 0:
+                    angle_diff += 2 * math.pi
+                angle_step = math.radians(10)
+                segment_count = abs(int(angle_diff / angle_step)) + 1
+                current_angle = start_angle
+                last_point = start
+                
+                for i in range(segment_count):
+                    next_angle = current_angle + angle_step
+                    if next_angle > end_angle:
+                        next_angle = end_angle
+                    x = center.x + int(radius * math.cos(next_angle))
+                    y = center.y + int(radius * math.sin(next_angle))
+                    next_point = pcbnew.VECTOR2I(x, y)
+                    segments.append((last_point, next_point))
+                    last_point = next_point
+                    current_angle = next_angle
+                    if next_angle == end_angle:
+                        break
+            
+            elif shape_type == pcbnew.S_CIRCLE:
+                wx.MessageBox("警告: 円形の外形線要素が検出されました。この形状は現在サポートされていません。", 
+                             "警告", wx.ICON_WARNING)
+    
+    if not segments:
+        return []
+    
+    # セグメントを接続して閉じたパスを構築
+    ordered_points = [segments[0][0]]
+    used_segments = {0}
+    current_point = segments[0][1]
+    max_iterations = len(segments) * 2
+    
+    for _ in range(max_iterations):
+        found = False
+        for i, (start, end) in enumerate(segments):
+            if i in used_segments:
+                continue
+            # 現在の点と次のセグメントの開始点または終了点が近いかを確認
+            if self.points_are_close(current_point, start):
+                used_segments.add(i)
+                ordered_points.append(start)
+                current_point = end
+                found = True
+                break
+            elif self.points_are_close(current_point, end):
+                used_segments.add(i)
+                ordered_points.append(end)
+                current_point = start
+                found = True
+                break
         
-        for _ in range(max_iterations):
-            found = False
+        if not found:
+            # 接続が見つからない場合、近接する点を検索してマージ
             for i, (start, end) in enumerate(segments):
                 if i in used_segments:
                     continue
-                if self.points_are_close(current_point, start):
+                min_dist_start = self.distance_to_segment(current_point, start, end)
+                min_dist_end = self.distance_to_segment(current_point, start, end)
+                if min_dist_start < 1000 or min_dist_end < 1000:  # 近接するセグメントを強制接続
                     used_segments.add(i)
+                    ordered_points.append(start)
                     current_point = end
-                    ordered_points.append(current_point)
                     found = True
                     break
-                elif self.points_are_close(current_point, end):
-                    used_segments.add(i)
-                    current_point = start
-                    ordered_points.append(current_point)
-                    found = True
-                    break
-            if not found:
-                break
         
-        if ordered_points and not self.points_are_close(ordered_points[0], ordered_points[-1]):
-            wx.MessageBox("警告: 基板外形線が完全に閉じていないようです。結果が正確でない可能性があります。", 
-                         "警告", wx.ICON_WARNING)
-        
-        return ordered_points
+        if not found or len(used_segments) == len(segments):
+            break
+    
+    # 閉じたポリゴンを確認
+    if ordered_points and not self.points_are_close(ordered_points[0], ordered_points[-1], tolerance=1000):
+        # 最後の点と最初の点を強制的に接続
+        ordered_points.append(ordered_points[0])
+        wx.MessageBox("警告: 外形線が閉じていないため、強制的に閉じました。", 
+                     "警告", wx.ICON_WARNING)
+    
+    # デバッグ: 取得したポイントをログに出力
+    print("Ordered points:", [(p.x, p.y) for p in ordered_points])
+    
+    return ordered_points
 
     def points_are_close(self, p1, p2, tolerance=10000):
         """2点が近いか判定"""
